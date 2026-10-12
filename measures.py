@@ -66,7 +66,7 @@ def measure_people(img_bgr, conf=0.25):
 
 
 def measure_faces(img_bgr):
-    """Detect faces; ensures each person has exactly ONE face box without duplicates."""
+    """Detect faces with snug bounding boxes fitting hairline to chin, cheek to cheek."""
     h, w = img_bgr.shape[:2]
     raw_boxes = []
 
@@ -76,77 +76,79 @@ def measure_faces(img_bgr):
             xy_data = res.keypoints.xy.cpu().numpy()
             conf_data = res.keypoints.conf.cpu().numpy() if res.keypoints.conf is not None else None
 
-            for idx, person_kpts in enumerate(xy_data):
-                face_pts = []
-                for kidx in range(min(5, len(person_kpts))):
-                    pt = person_kpts[kidx]
-                    cf = conf_data[idx][kidx] if conf_data is not None else 1.0
-                    if cf > 0.25 and (pt[0] > 0 or pt[1] > 0):
-                        face_pts.append((kidx, pt[0], pt[1]))
+            for idx, kpts in enumerate(xy_data):
+                cf = conf_data[idx] if conf_data is not None else [1.0] * len(kpts)
+                # Check for nose and eyes/ears
+                if cf[0] > 0.25 and (cf[1] > 0.25 or cf[2] > 0.25):
+                    nose = kpts[0]
+                    eye_pts = [kpts[i] for i in [1, 2] if cf[i] > 0.25 and kpts[i][0] > 0]
+                    ear_pts = [kpts[i] for i in [3, 4] if cf[i] > 0.25 and kpts[i][0] > 0]
 
-                if face_pts:
-                    pts_arr = np.array([[x, y] for _, x, y in face_pts])
-                    min_x, min_y = np.min(pts_arr, axis=0)
-                    max_x, max_y = np.max(pts_arr, axis=0)
-                    center_x = float(np.mean(pts_arr[:, 0]))
-                    center_y = float(np.mean(pts_arr[:, 1]))
+                    avg_eye_y = np.mean([p[1] for p in eye_pts]) if eye_pts else nose[1] - 30.0
+                    eye_nose_d = max(15.0, abs(nose[1] - avg_eye_y))
 
-                    kdict = {k: (x, y) for k, x, y in face_pts}
-                    if 3 in kdict and 4 in kdict:
-                        span_w = abs(kdict[4][0] - kdict[3][0])
-                        face_w = max(span_w * 1.35, 30.0)
-                    elif 1 in kdict and 2 in kdict:
-                        span_w = abs(kdict[2][0] - kdict[1][0])
-                        face_w = max(span_w * 2.5, 30.0)
+                    # Snug width (ear to ear or 2x eye span)
+                    if len(ear_pts) == 2:
+                        ear_span = abs(ear_pts[1][0] - ear_pts[0][0])
+                        face_w = ear_span * 1.08
+                        center_x = (ear_pts[0][0] + ear_pts[1][0]) / 2.0
+                    elif len(eye_pts) == 2:
+                        eye_span = abs(eye_pts[1][0] - eye_pts[0][0])
+                        face_w = eye_span * 2.0
+                        center_x = (eye_pts[0][0] + eye_pts[1][0]) / 2.0
                     else:
-                        face_w = max((max_x - min_x) * 2.2, 35.0)
+                        face_w = eye_nose_d * 3.0
+                        center_x = nose[0]
 
-                    face_h = face_w * 1.35
-                    if 0 in kdict:
-                        center_y = kdict[0][1] - face_h * 0.1
+                    # Snug height (forehead hairline to chin)
+                    top_y = avg_eye_y - 2.2 * eye_nose_d
+                    bottom_y = nose[1] + 1.6 * eye_nose_d
 
-                    bx = max(0, int(center_x - face_w * 0.5))
-                    by = max(0, int(center_y - face_h * 0.52))
+                    bx = max(0, int(center_x - face_w / 2.0))
+                    by = max(0, int(top_y))
                     bw = min(w - bx, int(face_w))
-                    bh = min(h - by, int(face_h))
+                    bh = min(h - by, int(bottom_y - top_y))
                     raw_boxes.append((bx, by, bw, bh))
     except Exception:
         raw_boxes = []
 
-    # 1. Deduplicate any overlapping face boxes (eliminates multiple boxes on the same face)
+    # 1. Deduplicate any overlapping face boxes
     deduped = _deduplicate_boxes(raw_boxes, thresh=0.35)
 
-    # 2. Check segmentation detections to ensure any detected figure without pose also gets a face box
+    # 2. Add snug head box for detected person segments without pose keypoints (e.g. held masks)
     try:
         res_seg = _get_yolo_seg().predict(img_bgr, classes=[0], conf=0.25, verbose=False)[0]
         if res_seg.boxes is not None:
             for pb in res_seg.boxes.xyxy.cpu().numpy():
                 px1, py1, px2, py2 = pb
                 pw, ph = px2 - px1, py2 - py1
-                # Check if this person already has a face box in their upper region
                 has_face = False
                 for fx, fy, fw, fh in deduped:
                     fc_x = fx + fw / 2.0
                     fc_y = fy + fh / 2.0
-                    if px1 <= fc_x <= px2 and py1 <= fc_y <= (py1 + ph * 0.65):
+                    if px1 <= fc_x <= px2 and py1 <= fc_y <= (py1 + ph * 0.70):
                         has_face = True
                         break
                 if not has_face and pw > 30 and ph > 40:
-                    fw = int(pw * 0.55)
-                    fh = int(ph * 0.35)
-                    fx = int(px1 + (pw - fw) / 2.0)
-                    fy = int(py1)
+                    fw = int(pw * 0.48)
+                    fh = int(ph * 0.38)
+                    fx = int(px1 + (pw - fw) * 0.45)
+                    fy = int(py1 + ph * 0.05)
                     deduped.append((max(0, fx), max(0, fy), min(w - fx, fw), min(h - fy, fh)))
     except Exception:
         pass
 
     final_boxes = _deduplicate_boxes(deduped, thresh=0.35)
+
+    # Calculate actual face area using snug box dimensions
     largest = max((bw * bh for _, _, bw, bh in final_boxes), default=0)
+    # True oval face area (pi / 4 ≈ 0.7854 of the bounding box)
+    largest_oval_area = largest * 0.7854
 
     return {
         "face_detected": "yes" if len(final_boxes) > 0 else "no",
         "n_faces": len(final_boxes),
-        "largest_face_pct": round(100.0 * largest / (h * w), 2),
+        "largest_face_pct": round(100.0 * largest_oval_area / (h * w), 2),
     }, final_boxes
 
 
