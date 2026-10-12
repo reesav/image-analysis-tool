@@ -1,11 +1,8 @@
-"""Measurement functions. Each returns a dict of values (and optionally drawing data).
-To add a new measure later (brightness, saturation...), write another function
-and call it from measure_image()."""
+"""Measurement functions using YOLO11 segmentation and OpenCV Haar Cascade face detection."""
 import cv2
 import numpy as np
 
 _YOLO = None
-_FACE = None
 _CASCADE = None
 
 
@@ -13,7 +10,7 @@ def _get_yolo():
     global _YOLO
     if _YOLO is None:
         from ultralytics import YOLO
-        _YOLO = YOLO("yolo11s-seg.pt")  # downloads on first run
+        _YOLO = YOLO("yolo11s-seg.pt")
     return _YOLO
 
 
@@ -23,26 +20,6 @@ def _get_cascade():
         cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
         _CASCADE = cv2.CascadeClassifier(cascade_path)
     return _CASCADE
-
-
-def _get_face():
-    global _FACE
-    if _FACE is False:
-        return None
-    if _FACE is None:
-        try:
-            import mediapipe as mp
-            if hasattr(mp, "solutions") and hasattr(mp.solutions, "face_detection"):
-                _FACE = mp.solutions.face_detection.FaceDetection(
-                    model_selection=1, min_detection_confidence=0.5)
-            else:
-                from mediapipe.python.solutions import face_detection
-                _FACE = face_detection.FaceDetection(
-                    model_selection=1, min_detection_confidence=0.5)
-        except Exception:
-            _FACE = False
-            return None
-    return _FACE
 
 
 def measure_people(img_bgr, conf=0.25):
@@ -63,31 +40,17 @@ def measure_people(img_bgr, conf=0.25):
 def measure_faces(img_bgr):
     """Detect faces; return count and size of largest face as % of image area."""
     h, w = img_bgr.shape[:2]
-    face_model = _get_face()
+    cascade = _get_cascade()
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+    detected = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
     boxes = []
-
-    if face_model is not None:
-        try:
-            out = face_model.process(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB))
-            for d in (out.detections or []):
-                b = d.location_data.relative_bounding_box
-                x, y = max(0, int(b.xmin * w)), max(0, int(b.ymin * h))
-                bw, bh = int(b.width * w), int(b.height * h)
-                boxes.append((x, y, bw, bh))
-        except Exception:
-            face_model = None
-
-    # Fallback to OpenCV Haar Cascade if MediaPipe solutions API is unavailable
-    if face_model is None:
-        cascade = _get_cascade()
-        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-        detected = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    if len(detected) > 0:
         for (x, y, bw, bh) in detected:
             boxes.append((int(x), int(y), int(bw), int(bh)))
 
     largest = max((bw * bh for _, _, bw, bh in boxes), default=0)
     return {
-        "face_detected": "yes" if boxes else "no",
+        "face_detected": "yes" if len(boxes) > 0 else "no",
         "n_faces": len(boxes),
         "largest_face_pct": round(100.0 * largest / (h * w), 2),
     }, boxes

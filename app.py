@@ -5,7 +5,9 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
-
+import importlib
+import measures
+importlib.reload(measures)
 from measures import measure_image
 
 st.set_page_config(page_title="Image Measures", page_icon="🖼️", layout="wide")
