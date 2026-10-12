@@ -1,31 +1,31 @@
-"""Measurement functions using YOLO11 segmentation and OpenCV Haar Cascade face detection."""
+"""Measurement functions using YOLO11 segmentation (people) and YOLO11 pose (faces)."""
 import cv2
 import numpy as np
 
-_YOLO = None
-_CASCADE = None
+_YOLO_SEG = None
+_YOLO_POSE = None
 
 
-def _get_yolo():
-    global _YOLO
-    if _YOLO is None:
+def _get_yolo_seg():
+    global _YOLO_SEG
+    if _YOLO_SEG is None:
         from ultralytics import YOLO
-        _YOLO = YOLO("yolo11s-seg.pt")
-    return _YOLO
+        _YOLO_SEG = YOLO("yolo11s-seg.pt")
+    return _YOLO_SEG
 
 
-def _get_cascade():
-    global _CASCADE
-    if _CASCADE is None:
-        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
-        _CASCADE = cv2.CascadeClassifier(cascade_path)
-    return _CASCADE
+def _get_yolo_pose():
+    global _YOLO_POSE
+    if _YOLO_POSE is None:
+        from ultralytics import YOLO
+        _YOLO_POSE = YOLO("yolo11n-pose.pt")
+    return _YOLO_POSE
 
 
 def measure_people(img_bgr, conf=0.25):
     """Count people and compute % of image covered by them (overlaps counted once)."""
     h, w = img_bgr.shape[:2]
-    res = _get_yolo().predict(img_bgr, classes=[0], conf=conf, verbose=False)[0]
+    res = _get_yolo_seg().predict(img_bgr, classes=[0], conf=conf, verbose=False)[0]
     mask = np.zeros((h, w), np.uint8)
     n = 0
     if res.masks is not None:
@@ -38,15 +38,35 @@ def measure_people(img_bgr, conf=0.25):
 
 
 def measure_faces(img_bgr):
-    """Detect faces; return count and size of largest face as % of image area."""
+    """Detect faces using YOLO pose keypoints (nose, eyes, ears); return count and largest face area."""
     h, w = img_bgr.shape[:2]
-    cascade = _get_cascade()
-    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
-    detected = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
     boxes = []
-    if len(detected) > 0:
-        for (x, y, bw, bh) in detected:
-            boxes.append((int(x), int(y), int(bw), int(bh)))
+
+    try:
+        res = _get_yolo_pose().predict(img_bgr, verbose=False)[0]
+        if res.keypoints is not None and res.keypoints.xy is not None:
+            xy_data = res.keypoints.xy.cpu().numpy()
+            conf_data = res.keypoints.conf.cpu().numpy() if res.keypoints.conf is not None else None
+            for idx, person_kpts in enumerate(xy_data):
+                face_pts = []
+                for kidx in range(min(5, len(person_kpts))):
+                    pt = person_kpts[kidx]
+                    cf = conf_data[idx][kidx] if conf_data is not None else 1.0
+                    if cf > 0.3 and (pt[0] > 0 or pt[1] > 0):
+                        face_pts.append(pt)
+                if face_pts:
+                    pts = np.array(face_pts)
+                    xmin, ymin = np.min(pts, axis=0)
+                    xmax, ymax = np.max(pts, axis=0)
+                    pad_w = max(10, int((xmax - xmin) * 0.3))
+                    pad_h = max(10, int((ymax - ymin) * 0.4))
+                    bx = max(0, int(xmin - pad_w))
+                    by = max(0, int(ymin - pad_h))
+                    bw = min(w - bx, int(xmax - xmin + 2 * pad_w))
+                    bh = min(h - by, int(ymax - ymin + 2 * pad_h))
+                    boxes.append((bx, by, bw, bh))
+    except Exception:
+        boxes = []
 
     largest = max((bw * bh for _, _, bw, bh in boxes), default=0)
     return {
