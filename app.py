@@ -73,7 +73,11 @@ st.write("Drag in one or more images, click **Run**, and download the results as
 
 files = st.file_uploader("Drop images here (JPG or PNG)", type=["jpg", "jpeg", "png"],
                          accept_multiple_files=True)
-
+# UI sliders for face detection parameters
+ear_span_multiplier = st.sidebar.slider("Ear‑span multiplier", 0.5, 2.0, 1.08, 0.01)
+eye_span_multiplier = st.sidebar.slider("Eye‑span multiplier", 0.5, 3.0, 2.0, 0.01)
+dedup_iou_threshold = st.sidebar.slider("Face IoU deduplication", 0.0, 1.0, 0.35, 0.01)
+keypoint_conf_threshold = st.sidebar.slider("Keypoint confidence", 0.0, 1.0, 0.30, 0.01)
 LABELS = {
     "filename": "Image",
     "n_people": "Number of people",
@@ -92,7 +96,13 @@ if st.button("Run", type="primary", disabled=not files):
         if img is None:
             st.warning(f"{f.name} could not be read as an image, skipped.")
             continue
-        vals, overlay = measure_image(img)
+        vals, overlay = measure_image(
+    img,
+    ear_span_multiplier=ear_span_multiplier,
+    eye_span_multiplier=eye_span_multiplier,
+    dedup_iou_threshold=dedup_iou_threshold,
+    keypoint_conf_threshold=keypoint_conf_threshold,
+)
         rows.append({"filename": f.name, **vals})
         overlays[f.name] = cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB)
         bar.progress((i + 1) / len(files))
